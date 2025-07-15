@@ -153,7 +153,7 @@ func (hp *HolePuncher) startReceiving(holePunched chan bool) {
 		if n < 1 {
 			continue
 		}
-		if raddr != hp.remoteAddr {
+		if !raddr.IP.Equal(hp.remoteAddr.IP) || (raddr.Port != hp.remoteAddr.Port) {
 			slog.Warn("Received message from unexpected address", "expected", hp.remoteAddr, "received", raddr)
 			continue
 		}
