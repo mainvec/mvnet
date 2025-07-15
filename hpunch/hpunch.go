@@ -100,7 +100,8 @@ func (hp *HolePuncher) State() HPuncherState {
 
 func (hp *HolePuncher) StartPunching(ctx context.Context, remoteAddr *net.UDPAddr) error {
 	if !hp.CanPunch() {
-		return fmt.Errorf("hole punching not supported for NAT type: %s", hp.natType)
+		slog.Warn("Hole punching not supported for this NAT type. Unlikely to succeed.", "natType", hp.natType)
+		//return fmt.Errorf("hole punching not supported for NAT type: %s", hp.natType)
 	}
 
 	hp.state = HPPuncherPunching
