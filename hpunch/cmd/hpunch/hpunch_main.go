@@ -13,15 +13,14 @@ var remoteAddr string
 
 func init() { // Initialize logging or any other setup if needed
 	//get params
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: hpunch <remote_address:port>")
-		os.Exit(1)
+	if len(os.Args) == 2 {
+		remoteAddr = os.Args[1]
 	}
-	remoteAddr := os.Args[1]
-	if remoteAddr == "" {
-		fmt.Println("Remote address cannot be empty")
-		os.Exit(1)
-	}
+	// remoteAddr := os.Args[1]
+	// if remoteAddr == "" {
+	// 	fmt.Println("Remote address cannot be empty")
+	// 	os.Exit(1)
+	// }
 
 }
 
@@ -52,8 +51,8 @@ func main() {
 	if hp.CanPunch() {
 		fmt.Println("✅ HolePuncher can punch holes")
 	} else {
-		fmt.Println("❌ HolePuncher cannot punch holes")
-		return
+		fmt.Printf("❌ HolePuncher likely not to success. NAT type: %s\n", hp.GetNATType())
+
 	}
 	if remoteAddr == "" {
 		//Read remote address from stdin
