@@ -2,9 +2,11 @@ package hpunch
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log/slog"
 	"net"
+	"reflect"
 	"time"
 
 	"github.com/mainvec/mvnet/nat"
@@ -21,6 +23,10 @@ const (
 	HPPuncherSuccess                       // Hole punching succeeded
 )
 
+var (
+	punchMsg = []byte("PUNCH") // Message sent during hole punching
+)
+
 type HolePuncher struct { // Add any required fields here
 
 	conn          *net.UDPConn // UDP connection for hole punching
@@ -30,6 +36,7 @@ type HolePuncher struct { // Add any required fields here
 	localAddr     *net.UDPAddr  // Local address used for hole punching
 	remoteAddr    *net.UDPAddr  // Remote address to punch holes to
 	hpMsgReceived bool
+	challenge     [12]byte // Challenge for hole punching
 }
 
 func NewHolePuncher(ctx context.Context) (*HolePuncher, error) {
@@ -103,7 +110,9 @@ func (hp *HolePuncher) StartPunching(ctx context.Context, remoteAddr *net.UDPAdd
 		slog.Warn("Hole punching not supported for this NAT type. Unlikely to succeed.", "natType", hp.natType)
 		//return fmt.Errorf("hole punching not supported for NAT type: %s", hp.natType)
 	}
-
+	var challenge [12]byte
+	rand.Read(challenge[:])
+	hp.challenge = challenge
 	hp.state = HPPuncherPunching
 	hp.remoteAddr = remoteAddr
 	holePunched := make(chan bool)
@@ -157,24 +166,36 @@ func (hp *HolePuncher) startReceiving(holePunched chan bool) {
 			slog.Warn("Received message from unexpected address", "expected", hp.remoteAddr, "received", raddr)
 			continue
 		}
+
+		if firstMsgReceived {
+			if reflect.DeepEqual(b[:n], hp.challenge[:]) {
+				slog.Info("Received challenge response from remote peer", "remoteAddr", raddr.String())
+				hp.hpMsgReceived = true
+				close(holePunched)
+				return
+			} else {
+				slog.Warn("Received unexpected message from remote peer", "remoteAddr", raddr.String(), "message", string(b[:n]))
+			}
+		}
 		if !firstMsgReceived {
 			firstMsgReceived = true
 			hp.hpMsgReceived = true
-			close(holePunched)
-			return
-
+			//close(holePunched)
 		}
+
 	}
 }
 
 func (hp *HolePuncher) startHolePunching(radd *net.UDPAddr, holePunched chan bool) {
-	punchMsg := []byte("PUNCH")
+	holeMsg := punchMsg
 	msgNum := 1
 
 	for {
-
+		if hp.hpMsgReceived {
+			holeMsg = hp.challenge[:]
+		}
 		hp.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // Short write timeout
-		n, err := hp.conn.WriteToUDP(punchMsg, radd)
+		n, err := hp.conn.WriteToUDP(holeMsg, radd)
 		if err != nil {
 			//chekc if timeout
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
