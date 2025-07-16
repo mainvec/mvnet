@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net"
 	"os"
+	"time"
 
 	"github.com/mainvec/mvnet/hpunch"
 )
@@ -62,6 +64,11 @@ func main() {
 			fmt.Println("Remote address cannot be empty")
 			return
 		}
+		if remoteAddr[0] == ':' {
+			remoteAddr = "127.0.0.1" + remoteAddr
+			fmt.Printf("Using remote address: %s\n", remoteAddr)
+		}
+
 		//parse remote address
 		remoteUDPAddress, err := net.ResolveUDPAddr("udp", remoteAddr)
 		if err != nil {
@@ -79,6 +86,61 @@ func main() {
 			return
 		}
 		fmt.Println("Hole punching succeeded")
+
+		conn := hp.GetConn()
+
+		if conn == nil {
+			fmt.Println("HolePuncher connection is nil")
+			return
+		}
+
+		go func() {
+			for {
+				buf := make([]byte, 1024)
+				conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // Set a read timeout
+				n, raddr, err := conn.ReadFromUDP(buf)
+				if err != nil {
+					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+						continue // Timeout, just skip
+					}
+					fmt.Printf("Error reading from UDP: %v\n", err)
+					return
+				}
+				fmt.Printf("From %s: %s\n", raddr.String(), string(buf[:n]))
+			}
+		}()
+
+		go func() {
+			for {
+				var msg string
+				fmt.Print("ME: ")
+				reader := bufio.NewReader(os.Stdin)
+				msg, err := reader.ReadString('\n')
+				if err != nil {
+					fmt.Printf("Error reading input: %v\n", err)
+					continue
+				}
+				if msg == "" {
+					fmt.Println("Message cannot be empty")
+					continue
+				}
+				conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // Set a write timeout
+
+				_, err = conn.WriteToUDP([]byte(msg), remoteUDPAddress)
+				if err != nil {
+					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+						continue // Timeout, just skip
+					}
+					fmt.Printf("Error sending message: %v\n", err)
+					return
+				}
+				fmt.Printf("Sent message to %s: %s\n", remoteUDPAddress.String(), msg)
+			}
+		}()
+
+		//wait for a system signal to exit
+		fmt.Println("Press Ctrl+C to exit")
+		select {} // Block forever
 
 	}
 

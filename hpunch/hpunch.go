@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"reflect"
 	"time"
 
 	"github.com/mainvec/mvnet/nat"
@@ -25,18 +24,21 @@ const (
 
 var (
 	punchMsg = []byte("PUNCH") // Message sent during hole punching
+	readyMsg = []byte("READY") // Message indicating readiness for hole punching
 )
 
 type HolePuncher struct { // Add any required fields here
 
-	conn          *net.UDPConn // UDP connection for hole punching
-	natType       nat.NATType
-	stunResult    *nat.STUNResult
-	state         HPuncherState // Current state of the hole puncher
-	localAddr     *net.UDPAddr  // Local address used for hole punching
-	remoteAddr    *net.UDPAddr  // Remote address to punch holes to
-	hpMsgReceived bool
-	challenge     [12]byte // Challenge for hole punching
+	conn             *net.UDPConn // UDP connection for hole punching
+	natType          nat.NATType
+	stunResult       *nat.STUNResult
+	state            HPuncherState // Current state of the hole puncher
+	localAddr        *net.UDPAddr  // Local address used for hole punching
+	remoteAddr       *net.UDPAddr  // Remote address to punch holes to
+	hpMsgReceived    bool
+	challenge        [12]byte // Challenge for hole punching
+	receivedReadyMsg bool     // Flag to indicate if the READY message was received
+	sendReadyMsg     bool     // Flag to indicate if the READY message was sent
 }
 
 func NewHolePuncher(ctx context.Context) (*HolePuncher, error) {
@@ -105,6 +107,10 @@ func (hp *HolePuncher) State() HPuncherState {
 	return hp.state
 }
 
+func (hp *HolePuncher) GetConn() *net.UDPConn {
+	return hp.conn
+}
+
 func (hp *HolePuncher) StartPunching(ctx context.Context, remoteAddr *net.UDPAddr) error {
 	if !hp.CanPunch() {
 		slog.Warn("Hole punching not supported for this NAT type. Unlikely to succeed.", "natType", hp.natType)
@@ -125,6 +131,7 @@ func (hp *HolePuncher) StartPunching(ctx context.Context, remoteAddr *net.UDPAdd
 	case <-ctx.Done():
 		hp.state = HPPuncherFailed
 		slog.Error("hole punching timed out", "remoteAddr", remoteAddr.String())
+		hp.conn.SetDeadline(time.Now())
 		return fmt.Errorf("hole punching timed out: %w", ctx.Err())
 	case <-holePunched:
 		if !hp.hpMsgReceived {
@@ -133,6 +140,7 @@ func (hp *HolePuncher) StartPunching(ctx context.Context, remoteAddr *net.UDPAdd
 			return fmt.Errorf("hole punching failed, no message received from remote peer: %s", remoteAddr.String())
 		}
 		hp.state = HPPuncherSuccess
+		hp.conn.SetDeadline(time.Now())
 		slog.Info("Hole punching successful", "remoteAddr", remoteAddr.String())
 		return nil
 	}
@@ -141,12 +149,12 @@ func (hp *HolePuncher) StartPunching(ctx context.Context, remoteAddr *net.UDPAdd
 
 func (hp *HolePuncher) startReceiving(holePunched chan bool) {
 	b := make([]byte, 1024)
-	firstMsgReceived := false
+	//firstMsgReceived := false
 	slog.Info("started receiving.", "listeningOn", hp.conn.LocalAddr().String())
 
 	for hp.state == HPPuncherPunching {
 
-		hp.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		hp.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		n, raddr, err := hp.conn.ReadFromUDP(b)
 		if err != nil {
 			//check if error is timeout
@@ -167,21 +175,58 @@ func (hp *HolePuncher) startReceiving(holePunched chan bool) {
 			continue
 		}
 
-		if firstMsgReceived {
-			if reflect.DeepEqual(b[:n], hp.challenge[:]) {
-				slog.Info("Received challenge response from remote peer", "remoteAddr", raddr.String())
-				hp.hpMsgReceived = true
-				close(holePunched)
-				return
-			} else {
-				slog.Warn("Received unexpected message from remote peer", "remoteAddr", raddr.String(), "message", string(b[:n]))
-			}
+		if n != len(punchMsg) && n != len(readyMsg) {
+			slog.Warn("Received message with unexpected length", "length", n, "from", raddr.String())
+			continue
 		}
-		if !firstMsgReceived {
-			firstMsgReceived = true
+		if string(b[:n]) == string(punchMsg) {
+			slog.Info("Received hole punch message from remote peer", "remoteAddr", raddr.String())
 			hp.hpMsgReceived = true
-			//close(holePunched)
+			hp.sendReadyMsg = true
+			continue
 		}
+		if string(b[:n]) == string(readyMsg) {
+			slog.Info("Received READY message from remote peer", "remoteAddr", raddr.String())
+			hp.receivedReadyMsg = true
+		}
+
+		// if n != len(hp.challenge) {
+		// 	//slog.Warn("Received message from remote peer is too short", "remoteAddr", raddr.String(), "length", n)
+		// 	continue
+		// }
+
+		// if reflect.DeepEqual(b[:n], hp.challenge[:]) {
+		// 	slog.Info("Received challenge from remote peer", "remoteAddr", raddr.String())
+		// 	hp.challengeReceived = true
+		// 	return
+		// } else {
+		// 	hp.remoteChallenge = b[:n]
+		// }
+
+		// if firstMsgReceived {
+		// 	// if n < len(hp.challenge) {
+		// 	// 	slog.Warn("Received message from remote peer is too short", "remoteAddr", raddr.String(), "length", n)
+		// 	// 	continue
+		// 	// }
+		// 	// hp.remoteChallenge = b[:n]
+
+		// 	if reflect.DeepEqual(b[:n], readyMsg) {
+		// 		slog.Info("Received challenge response from remote peer", "remoteAddr", raddr.String())
+		// 		hp.hpMsgReceived = true
+		// 		//close(holePunched)
+		// 		//hp.state = HPPuncherSuccess
+		// 		//slog.Info("Hole punching successful", "remoteAddr", raddr.String())
+		// 		//return
+		// 		//return
+		// 	}
+		// }
+		// if !firstMsgReceived {
+		// 	slog.Info("Received first message from remote peer", "remoteAddr", raddr.String(), "msg", string(b[:n]))
+		// 	firstMsgReceived = true
+		// 	//hp.hpMsgReceived = true
+
+		// 	//close(holePunched)
+		// }
 
 	}
 }
@@ -190,11 +235,13 @@ func (hp *HolePuncher) startHolePunching(radd *net.UDPAddr, holePunched chan boo
 	holeMsg := punchMsg
 	msgNum := 1
 
-	for {
+	for hp.state == HPPuncherPunching {
+
 		if hp.hpMsgReceived {
-			holeMsg = hp.challenge[:]
+			holeMsg = readyMsg
 		}
-		hp.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // Short write timeout
+		hp.conn.SetWriteDeadline(time.Now().Add(1 * time.Second)) // Short write timeout
+		slog.Info("Sending hole punch message", "msg", string(holeMsg), "msgNum", msgNum)
 		n, err := hp.conn.WriteToUDP(holeMsg, radd)
 		if err != nil {
 			//chekc if timeout
@@ -212,9 +259,17 @@ func (hp *HolePuncher) startHolePunching(radd *net.UDPAddr, holePunched chan boo
 			fmt.Printf("P%v ", msgNum)
 		}
 
+		if hp.hpMsgReceived && hp.receivedReadyMsg {
+			hp.state = HPPuncherSuccess
+			slog.Info("Hole punching successful, remote peer is ready", "remoteAddr", radd.String())
+			close(holePunched)
+			return
+		}
+
 		select {
 		case <-holePunched:
 			slog.Info("stopping hole punching.")
+			hp.state = HPPuncherSuccess
 			return
 		default:
 			time.Sleep(time.Millisecond * 500)
