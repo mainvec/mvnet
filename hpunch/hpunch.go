@@ -187,6 +187,7 @@ func (hp *HolePuncher) startReceiving(holePunched chan bool) {
 		}
 		if string(b[:n]) == string(readyMsg) {
 			slog.Info("Received READY message from remote peer", "remoteAddr", raddr.String())
+			hp.hpMsgReceived = true
 			hp.receivedReadyMsg = true
 		}
 
