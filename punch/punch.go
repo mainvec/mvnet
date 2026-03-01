@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -12,14 +13,16 @@ import (
 
 // Message types for the hole punching protocol
 const (
-	MessagePunch             = "punch"
-	MessageAck               = "ack"
-	MessageAckAck            = "ack_ack"
-	MessageKeepAlive         = "keepalive"
-	MessageKeepAliveAck      = "keepalive_ack"
+	MessagePunch  = "punch"
+	MessageAck    = "ack"
+	MessageAckAck = "ack_ack"
+	// MessageKeepAlive         = "keepalive"
+	// MessageKeepAliveAck      = "keepalive_ack"
 	MessageConnectionTest    = "connection_test"
 	MessageConnectionTestAck = "connection_test_ack"
 )
+
+var keepAliveZero = []byte{0}
 
 // HolePunchState represents the different states of the hole punching process
 type HolePunchState int32
@@ -237,6 +240,7 @@ func (hp *HolePuncher) safeDone() {
 		hp.doneClosed = true
 		hp.mu.Unlock()
 		close(hp.done)
+
 	})
 }
 
@@ -290,14 +294,14 @@ func (hp *HolePuncher) StartWithContext(ctx context.Context) error {
 
 	select {
 	case <-timeoutCtx.Done():
-		log.Println("Hole punching timed out")
+		slog.Debug("Hole punching timed out")
 		hp.setState(StateFailed)
 		hp.safeDone()
 		return fmt.Errorf("hole punching timed out after %v", hp.config.OverallTimeout)
 	case <-done:
 		state := hp.GetState()
 		if state == StateSuccessful {
-			log.Println("Hole punching completed successfully")
+			slog.Debug("Hole punching completed successfully")
 			// Start keep-alive monitoring
 			go hp.startKeepAlive()
 			return nil
@@ -318,10 +322,10 @@ func (hp *HolePuncher) punchWithContext(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("Punch process cancelled")
+			slog.Debug("Punch process cancelled")
 			return
 		case <-hp.Done():
-			log.Println("Stopping punch process")
+			slog.Debug("Stopping punch process")
 			return
 		case <-ticker.C:
 			currentState := hp.GetState()
@@ -343,7 +347,7 @@ func (hp *HolePuncher) punchWithContext(ctx context.Context) {
 				log.Printf("Error sending punch packet (%d/%d): %v", consecutiveErrors, hp.config.MaxConsecutiveErrors, err)
 
 				if consecutiveErrors >= hp.config.MaxConsecutiveErrors {
-					log.Println("Too many consecutive errors")
+					slog.Debug("Too many consecutive errors")
 					hp.setState(StateFailed)
 					hp.safeDone()
 					return
@@ -396,10 +400,10 @@ func (hp *HolePuncher) listenForMessagesWithContext(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("Message listener cancelled")
+			slog.Debug("Message listener cancelled")
 			return
 		case <-hp.Done():
-			log.Println("Stopping message listener")
+			slog.Debug("Stopping message listener")
 			return
 		default:
 			hp.conn.SetReadDeadline(time.Now().Add(hp.config.ReadTimeout))
@@ -418,7 +422,7 @@ func (hp *HolePuncher) listenForMessagesWithContext(ctx context.Context) {
 			}
 
 			message := string(buffer[:n])
-			log.Printf("Received message from %s: %s", addr.String(), message)
+			//log.Printf("Received message from %s: %s", addr.String(), message)
 			hp.handleMessage(message, addr)
 		}
 	}
@@ -436,11 +440,11 @@ func (hp *HolePuncher) handleMessage(message string, addr *net.UDPAddr) {
 	case MessageAckAck:
 		atomic.AddInt64(&hp.ackAckPacketsReceived, 1)
 		hp.handleAckAckPacket(addr)
-	case MessageKeepAlive:
-		atomic.AddInt64(&hp.keepAlivePacketsReceived, 1)
-		hp.handleKeepAlivePacket(addr)
-	case MessageKeepAliveAck:
-		hp.handleKeepAliveAckPacket(addr)
+	// case MessageKeepAlive:
+	// 	atomic.AddInt64(&hp.keepAlivePacketsReceived, 1)
+	// 	hp.handleKeepAlivePacket(addr)
+	// case MessageKeepAliveAck:
+	// 	hp.handleKeepAliveAckPacket(addr)
 	case MessageConnectionTest:
 		hp.handleConnectionTestPacket(addr)
 	case MessageConnectionTestAck:
@@ -456,7 +460,7 @@ func (hp *HolePuncher) handlePunchPacket(addr *net.UDPAddr) {
 
 	if !hp.receivedPunch.Load() {
 		hp.receivedPunch.Store(true)
-		log.Println("First punch packet received")
+		slog.Debug("First punch packet received")
 	}
 
 	// Send ACK response
@@ -469,7 +473,7 @@ func (hp *HolePuncher) handlePunchPacket(addr *net.UDPAddr) {
 	}
 
 	atomic.AddInt64(&hp.ackPacketsSent, 1)
-	log.Println("ACK packet sent")
+	slog.Debug("ACK packet sent")
 
 	// Transition to establishing state if not already there
 	if hp.GetState() == StatePunching {
@@ -484,7 +488,7 @@ func (hp *HolePuncher) handleAckPacket(addr *net.UDPAddr) {
 
 	if !hp.receivedAck.Load() {
 		hp.receivedAck.Store(true)
-		log.Println("First ACK packet received")
+		slog.Debug("First ACK packet received")
 	}
 
 	// Send ACK-ACK response
@@ -497,7 +501,7 @@ func (hp *HolePuncher) handleAckPacket(addr *net.UDPAddr) {
 	}
 
 	atomic.AddInt64(&hp.ackAckPacketsSent, 1)
-	log.Println("ACK-ACK packet sent")
+	slog.Debug("ACK-ACK packet sent")
 
 	// Transition to establishing state if not already there
 	if hp.GetState() == StatePunching {
@@ -515,7 +519,7 @@ func (hp *HolePuncher) handleAckAckPacket(addr *net.UDPAddr) {
 
 	if !hp.receivedAckAck.Load() {
 		hp.receivedAckAck.Store(true)
-		log.Println("First ACK-ACK packet received")
+		slog.Debug("First ACK-ACK packet received")
 	}
 
 	// Update connection state
@@ -529,7 +533,7 @@ func (hp *HolePuncher) handleAckAckPacket(addr *net.UDPAddr) {
 func (hp *HolePuncher) checkForVerification() {
 	if hp.receivedPunch.Load() && hp.receivedAck.Load() && hp.receivedAckAck.Load() {
 		if hp.setState(StateVerifying) {
-			log.Println("All handshake packets received, starting verification")
+			slog.Debug("All handshake packets received, starting verification")
 			go hp.startVerification()
 		}
 	}
@@ -538,7 +542,7 @@ func (hp *HolePuncher) checkForVerification() {
 // startVerification starts the connection verification process
 func (hp *HolePuncher) startVerification() {
 	if !hp.verificationPending.CompareAndSwap(false, true) {
-		log.Println("Verification already in progress")
+		slog.Debug("Verification already in progress")
 		return
 	}
 
@@ -555,24 +559,24 @@ func (hp *HolePuncher) startVerification() {
 		return
 	}
 
-	log.Println("Connection test packet sent")
+	slog.Debug("Connection test packet sent")
 
 	// Wait for verification result with timeout
 	select {
 	case success := <-hp.verificationResult:
 		if success {
-			log.Println("Connection verification successful")
+			slog.Debug("Connection verification successful")
 			hp.connState.Store(int32(ConnStateVerified))
 			hp.setState(StateSuccessful)
-			log.Println("Hole punching completed successfully")
+			slog.Debug("Hole punching completed successfully")
 			hp.safeDone()
 		} else {
-			log.Println("Connection verification failed")
+			slog.Debug("Connection verification failed")
 			hp.setState(StateFailed)
 		}
 		hp.safeDone()
 	case <-time.After(hp.config.VerificationTimeout):
-		log.Println("Connection verification timed out")
+		slog.Debug("Connection verification timed out")
 		hp.setState(StateFailed)
 		hp.safeDone()
 	}
@@ -591,7 +595,7 @@ func (hp *HolePuncher) handleConnectionTestPacket(addr *net.UDPAddr) {
 		return
 	}
 
-	log.Println("Connection test ACK sent")
+	slog.Debug("Connection test ACK sent")
 }
 
 // handleConnectionTestAckPacket processes incoming connection test ACK packets
@@ -601,57 +605,57 @@ func (hp *HolePuncher) handleConnectionTestAckPacket(addr *net.UDPAddr) {
 	// Signal verification success
 	select {
 	case hp.verificationResult <- true:
-		log.Println("Verification result sent: success")
+		slog.Debug("Verification result sent: success")
 	default:
-		log.Println("Verification result channel full or closed")
+		slog.Debug("Verification result channel full or closed")
 	}
 }
 
 // handleKeepAlivePacket processes incoming keep-alive packets
-func (hp *HolePuncher) handleKeepAlivePacket(addr *net.UDPAddr) {
-	log.Printf("Received keep-alive packet from %s", addr.String())
+// func (hp *HolePuncher) handleKeepAlivePacket(addr *net.UDPAddr) {
+// 	log.Printf("Received keep-alive packet from %s", addr.String())
 
-	// Reset missed keep-alive counter
-	atomic.StoreInt64(&hp.missedKeepAlives, 0)
+// 	// Reset missed keep-alive counter
+// 	atomic.StoreInt64(&hp.missedKeepAlives, 0)
 
-	// Send keep-alive ACK
-	keepAliveAckPacket := []byte(MessageKeepAliveAck)
-	hp.conn.SetWriteDeadline(time.Now().Add(hp.config.WriteTimeout))
-	_, err := hp.conn.WriteToUDP(keepAliveAckPacket, addr)
-	if err != nil {
-		log.Printf("Error sending keep-alive ACK: %v", err)
-		return
-	}
+// 	// Send keep-alive ACK
+// 	keepAliveAckPacket := []byte(MessageKeepAliveAck)
+// 	hp.conn.SetWriteDeadline(time.Now().Add(hp.config.WriteTimeout))
+// 	_, err := hp.conn.WriteToUDP(keepAliveAckPacket, addr)
+// 	if err != nil {
+// 		log.Printf("Error sending keep-alive ACK: %v", err)
+// 		return
+// 	}
 
-	log.Println("Keep-alive ACK sent")
-}
+// 	slog.Debug("Keep-alive ACK sent")
+// }
 
 // handleKeepAliveAckPacket processes incoming keep-alive ACK packets
-func (hp *HolePuncher) handleKeepAliveAckPacket(addr *net.UDPAddr) {
-	log.Printf("Received keep-alive ACK packet from %s", addr.String())
+// func (hp *HolePuncher) handleKeepAliveAckPacket(addr *net.UDPAddr) {
+// 	log.Printf("Received keep-alive ACK packet from %s", addr.String())
 
-	// Reset missed keep-alive counter
-	atomic.StoreInt64(&hp.missedKeepAlives, 0)
-}
+// 	// Reset missed keep-alive counter
+// 	atomic.StoreInt64(&hp.missedKeepAlives, 0)
+// }
 
 // startKeepAlive starts the keep-alive monitoring process
 func (hp *HolePuncher) startKeepAlive() {
 	if hp.GetState() != StateSuccessful {
-		log.Println("Cannot start keep-alive: connection not successful")
+		slog.Debug("Cannot start keep-alive: connection not successful")
 		return
 	}
 
-	log.Println("Starting keep-alive monitoring")
+	slog.Debug("Starting keep-alive monitoring")
 	ticker := time.NewTicker(hp.config.KeepAliveInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-hp.keepAliveCtx.Done():
-			log.Println("Keep-alive monitoring stopped")
+			slog.Debug("Keep-alive monitoring stopped")
 			return
 		case <-hp.Done():
-			log.Println("Keep-alive monitoring stopped: hole puncher done")
+			slog.Debug("Keep-alive monitoring stopped: hole puncher done")
 			return
 		case <-ticker.C:
 			// Check if we've missed too many keep-alives
@@ -664,9 +668,9 @@ func (hp *HolePuncher) startKeepAlive() {
 			}
 
 			// Send keep-alive packet
-			keepAlivePacket := []byte(MessageKeepAlive)
+			// keepAlivePacket := []byte(MessageKeepAlive)
 			hp.conn.SetWriteDeadline(time.Now().Add(hp.config.WriteTimeout))
-			_, err := hp.conn.WriteToUDP(keepAlivePacket, hp.remoteAddr)
+			_, err := hp.conn.WriteToUDP(keepAliveZero[:], hp.remoteAddr)
 			if err != nil {
 				log.Printf("Error sending keep-alive: %v", err)
 				atomic.AddInt64(&hp.missedKeepAlives, 1)
@@ -675,7 +679,7 @@ func (hp *HolePuncher) startKeepAlive() {
 
 			atomic.AddInt64(&hp.keepAlivePacketsSent, 1)
 			atomic.AddInt64(&hp.missedKeepAlives, 1)
-			log.Println("Keep-alive packet sent")
+			slog.Debug("Keep-alive packet sent")
 		}
 	}
 }
@@ -717,7 +721,7 @@ func (hp *HolePuncher) IsConnected() bool {
 
 // Close closes the hole puncher and optionally the underlying connection
 func (hp *HolePuncher) Close() error {
-	log.Println("Closing HolePuncher")
+	slog.Debug("Closing HolePuncher")
 
 	// Cancel keep-alive monitoring
 	if hp.keepAliveCancel != nil {
@@ -754,6 +758,8 @@ func (hp *HolePuncher) ReceiveData(buffer []byte) (int, *net.UDPAddr, error) {
 	if !hp.IsConnected() {
 		return 0, nil, fmt.Errorf("connection not established")
 	}
+
+	//TODO add  read timeout
 
 	hp.conn.SetReadDeadline(time.Now().Add(hp.config.ReadTimeout))
 	return hp.conn.ReadFromUDP(buffer)

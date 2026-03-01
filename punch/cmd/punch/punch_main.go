@@ -156,8 +156,7 @@ func startChat(hp *punch.HolePuncher, remoteAddr string) {
 			buf := make([]byte, 1024)
 
 			conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // Set a read timeout
-			n, addr, err := conn.ReadFromUDP(buf)
-
+			_, _, err := conn.ReadFromUDP(buf)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					continue
@@ -165,7 +164,7 @@ func startChat(hp *punch.HolePuncher, remoteAddr string) {
 				fmt.Printf("Error reading from UDP: %v\n", err)
 				return
 			}
-			fmt.Printf("Received message from %s: %s\n", addr, string(buf[:n]))
+			//fmt.Printf("Received message from %s: %s\n", addr, string(buf[:n]))
 		}
 	}()
 
