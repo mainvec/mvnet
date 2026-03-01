@@ -208,8 +208,9 @@ func QuerySTUNServerWithConn(conn *net.UDPConn, serverAddr string) (STUNQueryRes
 		return ZERO_STUNQueryResult, fmt.Errorf("failed to resolve %s: %w", serverAddr, err)
 	}
 
-	// Set timeout
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	// Set timeout (2s is plenty for a STUN server; avoids blocking the ICE
+	// agent for too long when querying through unreachable interfaces).
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
 
 	// Create and send STUN binding request
 	request := createBindingRequest()

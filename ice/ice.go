@@ -176,6 +176,14 @@ func (a *Agent) gatherHostCandidates() error {
 				continue
 			}
 
+			// Skip CGNAT range (100.64.0.0/10) — used by Tailscale and
+			// similar overlays. These addresses never work for direct NAT
+			// traversal and STUN queries through them add seconds of delay.
+			if isCGNAT(ipNet.IP) {
+				a.logf("skipping CGNAT address %s on %s", ipNet.IP, iface.Name)
+				continue
+			}
+
 			conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ipNet.IP, Port: 0})
 			if err != nil {
 				a.logf("bind %s failed: %v", ipNet.IP, err)
@@ -203,6 +211,18 @@ func (a *Agent) gatherHostCandidates() error {
 	return nil
 }
 
+// isCGNAT returns true if ip is in the CGNAT / shared address range
+// 100.64.0.0/10 (RFC 6598). Tailscale, carrier NAT, and similar overlays
+// use this range; these addresses never work for ICE hole punching.
+func isCGNAT(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	// 100.64.0.0/10 → first octet 100, second octet 64–127
+	return ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127
+}
+
 func (a *Agent) gatherServerReflexiveCandidates(ctx context.Context) {
 	a.mu.RLock()
 	hosts := make([]*Candidate, 0, len(a.localCandidates))
@@ -213,38 +233,66 @@ func (a *Agent) gatherServerReflexiveCandidates(ctx context.Context) {
 	}
 	a.mu.RUnlock()
 
+	if len(hosts) == 0 || len(a.config.STUNServers) == 0 {
+		return
+	}
+
+	// Query all host candidates in parallel to avoid sequential STUN
+	// timeouts on unreachable interfaces (VPN, VM) eating into the
+	// overall hole-punch deadline.
+	type srflxResult struct {
+		host   *Candidate
+		result stun.STUNQueryResult
+		server string
+	}
+	resultCh := make(chan srflxResult, len(hosts))
+	var wg sync.WaitGroup
+
 	for _, hc := range hosts {
-		for _, server := range a.config.STUNServers {
-			if ctx.Err() != nil {
-				return
+		wg.Add(1)
+		go func(hc *Candidate) {
+			defer wg.Done()
+			for _, server := range a.config.STUNServers {
+				if ctx.Err() != nil {
+					return
+				}
+				result, err := stun.QuerySTUNServerWithConn(hc.Conn, server)
+				// Reset deadline set by stun package.
+				hc.Conn.SetDeadline(time.Time{})
+				if err != nil {
+					a.logf("STUN %s via %s failed: %v", server, hc.Address, err)
+					continue
+				}
+				resultCh <- srflxResult{host: hc, result: result, server: server}
+				return // One srflx per host candidate.
 			}
-			result, err := stun.QuerySTUNServerWithConn(hc.Conn, server)
-			// Reset deadline set by stun package.
-			hc.Conn.SetDeadline(time.Time{})
-			if err != nil {
-				a.logf("STUN %s via %s failed: %v", server, hc.Address, err)
-				continue
-			}
+		}(hc)
+	}
 
-			c := &Candidate{
-				Type:        CandidateServerReflexive,
-				Foundation:  fmt.Sprintf("srflx_%s_%d", result.IP, result.Port),
-				Component:   1,
-				Address:     result.IP,
-				Port:        result.Port,
-				RelatedIP:   hc.Address,
-				RelatedPort: hc.Port,
-				Conn:        hc.Conn, // Share the host candidate's socket (fixes srflx socket reuse).
-			}
-			c.calculatePriority()
+	// Close channel once all goroutines are done.
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
 
-			a.mu.Lock()
-			a.localCandidates = append(a.localCandidates, c)
-			a.mu.Unlock()
-
-			a.logf("srflx candidate: %s (via %s)", c.String(), server)
-			break // One srflx per host candidate.
+	for r := range resultCh {
+		c := &Candidate{
+			Type:        CandidateServerReflexive,
+			Foundation:  fmt.Sprintf("srflx_%s_%d", r.result.IP, r.result.Port),
+			Component:   1,
+			Address:     r.result.IP,
+			Port:        r.result.Port,
+			RelatedIP:   r.host.Address,
+			RelatedPort: r.host.Port,
+			Conn:        r.host.Conn, // Share the host candidate's socket.
 		}
+		c.calculatePriority()
+
+		a.mu.Lock()
+		a.localCandidates = append(a.localCandidates, c)
+		a.mu.Unlock()
+
+		a.logf("srflx candidate: %s (via %s)", c.String(), r.server)
 	}
 }
 
@@ -299,10 +347,13 @@ func (a *Agent) RunChecks(ctx context.Context) (*CandidatePair, error) {
 
 	// Collect results; break early on host-host success.
 	foundHostHost := false
+	succeeded := 0
+	failed := 0
 	for i := 0; i < len(pairs) && !foundHostHost; i++ {
 		select {
 		case r := <-resultCh:
 			if r.success {
+				succeeded++
 				r.pair.State = PairStateSucceeded
 				r.pair.Valid = true
 				a.mu.Lock()
@@ -316,12 +367,18 @@ func (a *Agent) RunChecks(ctx context.Context) (*CandidatePair, error) {
 					foundHostHost = true
 				}
 			} else {
+				failed++
 				r.pair.State = PairStateFailed
 			}
 		case <-ctx.Done():
+			a.logf("context expired during checks (%d succeeded, %d failed, %d pending)",
+				succeeded, failed, len(pairs)-i)
 			return nil, ctx.Err()
 		}
 	}
+
+	a.logf("connectivity checks done: %d succeeded, %d failed out of %d pairs",
+		succeeded, failed, len(pairs))
 
 	// Nomination phase.
 	if a.role == RoleControlling {
