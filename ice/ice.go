@@ -20,6 +20,7 @@ type Config struct {
 	CheckTimeout      time.Duration // Per-check response timeout (default 3s).
 	NominationTimeout time.Duration // How long controlled agent waits for nomination (default 10s).
 	MaxChecks         int           // Maximum candidate pairs to check (default 20).
+	ExcludeSubnets    []*net.IPNet  // Subnets to exclude from host candidates (e.g., TUN/overlay).
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -184,6 +185,14 @@ func (a *Agent) gatherHostCandidates() error {
 				continue
 			}
 
+			// Skip addresses in explicitly excluded subnets (e.g., TUN/overlay
+			// interfaces). Gathering candidates on these creates non-functional
+			// "direct" paths that route through the overlay itself.
+			if a.isExcludedSubnet(ipNet.IP) {
+				a.logf("skipping excluded subnet address %s on %s", ipNet.IP, iface.Name)
+				continue
+			}
+
 			conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ipNet.IP, Port: 0})
 			if err != nil {
 				a.logf("bind %s failed: %v", ipNet.IP, err)
@@ -221,6 +230,17 @@ func isCGNAT(ip net.IP) bool {
 	}
 	// 100.64.0.0/10 → first octet 100, second octet 64–127
 	return ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127
+}
+
+// isExcludedSubnet checks whether ip falls within any of the configured
+// ExcludeSubnets (e.g., TUN/overlay networks).
+func (a *Agent) isExcludedSubnet(ip net.IP) bool {
+	for _, subnet := range a.config.ExcludeSubnets {
+		if subnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Agent) gatherServerReflexiveCandidates(ctx context.Context) {
