@@ -306,7 +306,7 @@ func (n *NATDetector) analyzePortConsistency(results []STUNResult) NATType {
 
 // performAdditionalTests performs additional tests for edge cases
 func (n *NATDetector) performAdditionalTests(ctx context.Context, initialResults []STUNResult) NATType {
-	fmt.Println("\nPerforming additional NAT behavior tests...")
+	//fmt.Println("\nPerforming additional NAT behavior tests...")
 
 	// Test 1: Multiple queries to the same server
 	if len(initialResults) > 0 {
