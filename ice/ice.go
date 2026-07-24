@@ -160,7 +160,11 @@ func (a *Agent) GatherCandidates(ctx context.Context) error {
 func (a *Agent) gatherHostCandidates() error {
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		return fmt.Errorf("list interfaces: %w", err)
+		// On Android, net.Interfaces() fails with "netlinkrib: permission denied"
+		// because apps can't access raw netlink sockets. Fall back to binding
+		// 0.0.0.0 and letting the OS route through the correct interface.
+		a.logf("list interfaces failed (expected on Android): %v; using wildcard bind", err)
+		return a.gatherHostCandidateWildcard()
 	}
 
 	for _, iface := range interfaces {
@@ -217,6 +221,48 @@ func (a *Agent) gatherHostCandidates() error {
 			a.logf("host candidate: %s", c.String())
 		}
 	}
+	return nil
+}
+
+// gatherHostCandidateWildcard creates a single host candidate bound to 0.0.0.0.
+// Used as a fallback on platforms where net.Interfaces() is unavailable (Android).
+func (a *Agent) gatherHostCandidateWildcard() error {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		return fmt.Errorf("wildcard bind failed: %w", err)
+	}
+
+	actualAddr := conn.LocalAddr().(*net.UDPAddr)
+
+	// On Android, LocalAddr() returns 0.0.0.0 which remote peers can't
+	// route to. Discover the real outbound IP by connecting a throwaway
+	// UDP socket — the kernel fills in the interface IP without sending.
+	candidateIP := actualAddr.IP
+	if candidateIP.IsUnspecified() {
+		probe, dialErr := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(8, 8, 8, 8), Port: 53})
+		if dialErr == nil {
+			if localAddr, ok := probe.LocalAddr().(*net.UDPAddr); ok && !localAddr.IP.IsUnspecified() {
+				candidateIP = localAddr.IP
+			}
+			probe.Close()
+		}
+	}
+
+	c := &Candidate{
+		Type:       CandidateHost,
+		Foundation: "host_wildcard",
+		Component:  1,
+		Address:    candidateIP,
+		Port:       actualAddr.Port,
+		Conn:       conn,
+	}
+	c.calculatePriority()
+
+	a.mu.Lock()
+	a.localCandidates = append(a.localCandidates, c)
+	a.mu.Unlock()
+
+	a.logf("host candidate (wildcard): %s", c.String())
 	return nil
 }
 
