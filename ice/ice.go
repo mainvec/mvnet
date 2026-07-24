@@ -420,21 +420,25 @@ func (a *Agent) RunChecks(ctx context.Context) (*CandidatePair, error) {
 		case r := <-resultCh:
 			if r.success {
 				succeeded++
+				a.mu.Lock()
 				r.pair.State = PairStateSucceeded
 				r.pair.Valid = true
-				a.mu.Lock()
 				a.validPairs = append(a.validPairs, r.pair)
+				pairStr := r.pair.String()
+				isHostHost := r.pair.Local.Type == CandidateHost && r.pair.Remote.Type == CandidateHost
 				a.mu.Unlock()
-				a.logf("valid pair: %s", r.pair.String())
+				a.logf("valid pair: %s", pairStr)
 
-				if r.pair.Local.Type == CandidateHost && r.pair.Remote.Type == CandidateHost {
+				if isHostHost {
 					a.logf("host-host pair found, cancelling remaining checks")
 					checkCancel()
 					foundHostHost = true
 				}
 			} else {
 				failed++
+				a.mu.Lock()
 				r.pair.State = PairStateFailed
+				a.mu.Unlock()
 			}
 		case <-ctx.Done():
 			a.logf("context expired during checks (%d succeeded, %d failed, %d pending)",
@@ -543,12 +547,13 @@ func (a *Agent) nominate(ctx context.Context) (*CandidatePair, error) {
 		return nil, fmt.Errorf("nomination check failed for %s", best.String())
 	}
 
-	best.Nominated = true
 	a.mu.Lock()
+	best.Nominated = true
 	a.selectedPair = best
+	selectedStr := best.String()
 	a.mu.Unlock()
 
-	a.logf("nominated: %s", best.String())
+	a.logf("nominated: %s", selectedStr)
 	return best, nil
 }
 
@@ -561,8 +566,8 @@ func (a *Agent) waitForNomination(ctx context.Context) (*CandidatePair, error) {
 		return pair, nil
 	case <-time.After(a.config.NominationTimeout):
 		// Fallback: pick best valid pair if nomination signal was missed.
-		a.mu.RLock()
-		defer a.mu.RUnlock()
+		a.mu.Lock()
+		defer a.mu.Unlock()
 		if len(a.validPairs) > 0 {
 			best := a.validPairs[0]
 			for _, p := range a.validPairs[1:] {
