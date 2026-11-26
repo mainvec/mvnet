@@ -538,13 +538,14 @@ func (a *Agent) nominate(ctx context.Context) (*CandidatePair, error) {
 			best = p
 		}
 	}
+	bestStr := best.String()
 	a.mu.RUnlock()
 
-	a.logf("nominating: %s", best.String())
+	a.logf("nominating: %s", bestStr)
 
 	// Send USE-CANDIDATE check.
 	if !a.performConnectivityCheck(ctx, best, true) {
-		return nil, fmt.Errorf("nomination check failed for %s", best.String())
+		return nil, fmt.Errorf("nomination check failed for %s", bestStr)
 	}
 
 	a.mu.Lock()
@@ -562,7 +563,12 @@ func (a *Agent) waitForNomination(ctx context.Context) (*CandidatePair, error) {
 
 	select {
 	case pair := <-a.nominationCh:
-		a.logf("received nomination: %s", pair.String())
+		// Format under a.mu: handleNomination may still write pair.Nominated
+		// when the controlling agent retransmits USE-CANDIDATE.
+		a.mu.RLock()
+		pairStr := pair.String()
+		a.mu.RUnlock()
+		a.logf("received nomination: %s", pairStr)
 		return pair, nil
 	case <-time.After(a.config.NominationTimeout):
 		// Fallback: pick best valid pair if nomination signal was missed.

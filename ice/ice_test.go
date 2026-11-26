@@ -434,3 +434,47 @@ func TestParseCandidateType(t *testing.T) {
 		}
 	}
 }
+
+// TestNominationNoRace ensures repeated USE-CANDIDATE nominations (the
+// controlling agent retransmits them) don't race with the controlled agent
+// formatting the nominated pair. Run with -race.
+func TestNominationNoRace(t *testing.T) {
+	agent := NewAgent(DefaultConfig(), RoleControlled)
+	agent.SetLogger(func(string, ...any) {})
+
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	remote := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 40000}
+	local := &Candidate{Conn: conn, Address: net.ParseIP("127.0.0.1"), Port: conn.LocalAddr().(*net.UDPAddr).Port}
+	pair := &CandidatePair{
+		Local:  local,
+		Remote: &Candidate{Address: remote.IP, Port: remote.Port},
+		State:  PairStateSucceeded,
+		Valid:  true,
+	}
+	agent.validPairs = []*CandidatePair{pair}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			agent.handleNomination(conn, remote)
+		}
+	}()
+
+	got, err := agent.waitForNomination(context.Background())
+	if err != nil {
+		t.Fatalf("waitForNomination: %v", err)
+	}
+	<-done
+	if got != pair {
+		t.Fatal("unexpected nominated pair")
+	}
+	if !got.Nominated {
+		t.Error("pair should be nominated")
+	}
+}
